@@ -45,7 +45,7 @@ def run_diagnosis(n, seed):
 
 # ----------------------------- Sidebar ------------------------------------
 st.sidebar.title("⚙️ Data controls")
-n_users = st.sidebar.slider("Number of users", 1000, 20000, 10000, step=1000)
+n_users = st.sidebar.slider("Number of users", 1000, 20000, 8000, step=1000)
 seed = st.sidebar.number_input("Random seed", value=42, step=1)
 df = load(n_users, int(seed))
 
@@ -358,7 +358,22 @@ with tab_diag:
         "filters). In production this runs daily on the inflow/outflow feed."
     )
 
-    recs, drift = run_diagnosis(n_users, int(seed))
+    # Gate the heavy Cox/logistic fitting behind a button: Streamlit runs every tab's
+    # body on each rerun, so without this the models would refit on every interaction
+    # (slow on small cloud instances). Results persist for the session once computed.
+    if st.button("▶️ Run cohort diagnosis", type="primary"):
+        st.session_state["diag_run"] = True
+
+    if not st.session_state.get("diag_run"):
+        st.info(
+            "Click **Run cohort diagnosis** to fit the per-cohort survival + logistic "
+            f"models on {n_users:,} users (takes a few seconds). Kept off the initial "
+            "load so the app opens instantly."
+        )
+        st.stop()
+
+    with st.spinner("Fitting per-cohort Cox + logistic models…"):
+        recs, drift = run_diagnosis(n_users, int(seed))
     actionable = sorted(
         [r for r in recs if r["top_driver"] is not None],
         key=lambda r: r.get("est_saveable", 0),
