@@ -74,6 +74,15 @@ streamlit run app.py
 python data_generator.py    # inflow.csv, outflow.csv, users_master.csv
 ```
 
+## Retention discounting & LTV
+
+The Test & Learn tab includes a **retention-discount** lever priced into **36-month LTV**
+(`churn_model.ltv`). A discount both lowers churn *and* lowers ARPU, so LTV is computed
+over a **fixed horizon** (not the naive `ARPU/churn`, which would make any retention look
+infinitely good). The result is the real trade-off: discounting is **accretive for
+flight-risk segments** (e.g. competitor-exposed non-MAU) but **dilutive for loyal users**
+— so you target the cut, not blanket it.
+
 ## Caveats (say these to your boss before they ask)
 
 - The engine ranks **associations, not proven causes** — that's exactly why each insight

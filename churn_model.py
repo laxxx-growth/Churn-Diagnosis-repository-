@@ -132,12 +132,59 @@ def linear_predictor(df, market_aware=True):
     return eta
 
 
-def churn_probability(df, market_aware=True):
+def churn_probability(df, retention_discount=0.0, market_aware=True):
     """Logistic-style churn probability for the dashboard simulator.
 
     Derived from the same hazard linear predictor so interventions (more
     engagement, more features, etc.) move it in the right direction.
+
+    `retention_discount` (0..1, scalar or per-row) models a retention price cut:
+    a deeper discount lowers churn hazard (people stay), scaled by
+    DISCOUNT_RETENTION_BETA. This is separate from the *acquisition* discount tier.
     """
     eta = linear_predictor(df, market_aware=market_aware)
-    # Centre/scale eta into a sensible probability band.
-    return _sigmoid(1.15 * (eta - 1.4))
+    eta = eta - DISCOUNT_RETENTION_BETA * np.asarray(retention_discount, dtype=float)
+    # Centre/scale so the average propensity tracks the realised ~30% annual churn
+    # (keeps the simulator consistent with the Overview tab and the LTV maths sane).
+    return _sigmoid(1.0 * (eta - 2.4))
+
+
+# ---------------------------------------------------------------------------
+# Revenue / Lifetime Value
+# ---------------------------------------------------------------------------
+# Monthly ARPU by acquisition tier (₹). Discount-conversion users already pay less.
+ARPU_MONTHLY = {"Full price": 119.0, "Discount conversion": 66.0}
+
+# How strongly a retention discount lowers churn hazard (per unit discount fraction).
+DISCOUNT_RETENTION_BETA = 3.5
+
+# LTV is computed over a FIXED horizon (months), not the naive ARPU/churn formula.
+# A finite horizon is what makes discounting a genuine trade-off: it's accretive for
+# flight-risk users but dilutive for loyal ones (where you'd just be giving away margin).
+LTV_HORIZON_MONTHS = 36
+
+
+def monthly_arpu(df, extra_discount=0.0):
+    """Per-user monthly revenue after an optional extra retention discount (0..1)."""
+    base = df["price_tier"].map(ARPU_MONTHLY).to_numpy(dtype=float)
+    return base * (1.0 - np.asarray(extra_discount, dtype=float))
+
+
+def _monthly_churn(prob):
+    """Convert the model's churn propensity (treated as annual) to a monthly rate."""
+    c = np.clip(prob, 0.005, 0.95)
+    return 1.0 - (1.0 - c) ** (1.0 / 12.0)
+
+
+def ltv(df, retention_discount=0.0, extra_discount=0.0, horizon=LTV_HORIZON_MONTHS,
+        market_aware=True):
+    """Expected lifetime value per user over a fixed horizon.
+
+    LTV = monthly_arpu × E[months retained within horizon]. A retention discount
+    BOTH lowers churn (via retention_discount) AND lowers ARPU (via extra_discount) —
+    pass the same fraction to both to model a price cut.
+    """
+    prob = churn_probability(df, retention_discount=retention_discount, market_aware=market_aware)
+    c_m = _monthly_churn(prob)
+    exp_months = (1.0 - (1.0 - c_m) ** horizon) / c_m
+    return monthly_arpu(df, extra_discount=extra_discount) * exp_months

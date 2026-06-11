@@ -232,7 +232,8 @@ with tab_tl:
     st.caption(
         "Pick a target segment, apply a treatment, and project the churn impact. "
         "Projection recomputes churn probability with the **same model that generated "
-        "the data**, so the lift is internally consistent."
+        "the data**, then prices the result into **LTV** (36-month horizon) so you can "
+        "see whether a lever — especially **retention discounting** — actually pays."
     )
 
     seg_col1, seg_col2 = st.columns(2)
@@ -252,6 +253,7 @@ with tab_tl:
         treatment = st.selectbox(
             "Treatment / intervention",
             [
+                "Offer retention discount (N% off)",
                 "Lift avg engagement by N minutes",
                 "Drive feature adoption (+N features)",
                 "Convert discount users to full price",
@@ -260,7 +262,16 @@ with tab_tl:
             ],
         )
 
-    magnitude = st.slider("Treatment magnitude (N)", 1, 60, 15)
+    is_discount_tx = treatment == "Offer retention discount (N% off)"
+    if is_discount_tx:
+        magnitude = st.slider(
+            "Discount depth (% off current price)", 5, 60, 25,
+            help="A deeper cut retains more users but lowers ARPU — watch the net LTV.",
+        )
+        discount_frac = magnitude / 100.0
+    else:
+        magnitude = st.slider("Treatment magnitude (N)", 1, 60, 15)
+        discount_frac = 0.0
     adoption_rate = st.slider(
         "Treatment take-up rate (%)", 5, 100, 60,
         help="Not everyone in the segment responds — what share actually takes the treatment?",
@@ -281,7 +292,13 @@ with tab_tl:
     rng = np.random.default_rng(int(seed) + 7)
     takeup = seg & (pd.Series(rng.random(len(fdf)), index=fdf.index) < adoption_rate)
 
-    if treatment == "Lift avg engagement by N minutes":
+    # Per-user retention discount fraction (only the treated users, only for the
+    # discount intervention). Drives BOTH lower churn and lower ARPU.
+    disc = pd.Series(0.0, index=fdf.index)
+
+    if treatment == "Offer retention discount (N% off)":
+        disc.loc[takeup] = discount_frac
+    elif treatment == "Lift avg engagement by N minutes":
         treated.loc[takeup, "avg_engagement_mins"] = (
             treated.loc[takeup, "avg_engagement_mins"] + magnitude
         ).clip(upper=300)
@@ -297,7 +314,11 @@ with tab_tl:
         treated.loc[takeup, "mau"] = 1
 
     base_prob = cm.churn_probability(fdf)
-    new_prob = cm.churn_probability(treated)
+    new_prob = cm.churn_probability(treated, retention_discount=disc.values)
+
+    # ---- LTV (revenue) impact ----
+    base_ltv = cm.ltv(fdf)
+    new_ltv = cm.ltv(treated, retention_discount=disc.values, extra_discount=disc.values)
 
     seg_idx = takeup
     base_seg = base_prob[seg_idx.values].mean() if seg_idx.any() else 0
@@ -323,27 +344,72 @@ with tab_tl:
     )
     m4.metric("Expected users retained", f"{expected_saved:,.0f}")
 
-    comp = pd.DataFrame(
-        {
-            "scenario": ["Baseline", "After treatment"],
-            "segment_churn": [base_seg, new_seg],
-            "overall_churn": [overall_base, overall_new],
-        }
-    )
-    fig = px.bar(
-        comp.melt(id_vars="scenario", var_name="metric", value_name="churn"),
-        x="metric", y="churn", color="scenario", barmode="group",
-        title="Projected churn: baseline vs treatment",
-    )
-    fig.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig, width="stretch")
+    # ---- LTV read-out (the revenue trade-off) ----
+    if seg_idx.any():
+        base_ltv_seg = float(base_ltv[seg_idx.values].mean())
+        new_ltv_seg = float(new_ltv[seg_idx.values].mean())
+        total_dltv = float((new_ltv[seg_idx.values] - base_ltv[seg_idx.values]).sum())
+    else:
+        base_ltv_seg = new_ltv_seg = total_dltv = 0.0
+    per_user_dltv = new_ltv_seg - base_ltv_seg
 
+    l1, l2, l3 = st.columns(3)
+    l1.metric("Avg LTV / treated user (36-mo)", f"₹{new_ltv_seg:,.0f}",
+              delta=f"₹{per_user_dltv:,.0f}")
+    l2.metric("Net ΔLTV across treated", f"₹{total_dltv:,.0f}")
+    l3.metric("Verdict", "Accretive ✅" if total_dltv >= 0 else "Dilutive ❌")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        comp = pd.DataFrame(
+            {
+                "scenario": ["Baseline", "After treatment"],
+                "segment_churn": [base_seg, new_seg],
+                "overall_churn": [overall_base, overall_new],
+            }
+        )
+        fig = px.bar(
+            comp.melt(id_vars="scenario", var_name="metric", value_name="churn"),
+            x="metric", y="churn", color="scenario", barmode="group",
+            title="Projected churn: baseline vs treatment",
+        )
+        fig.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig, width="stretch")
+    with c2:
+        ltvc = pd.DataFrame(
+            {"scenario": ["Baseline", "After treatment"],
+             "avg_ltv": [base_ltv_seg, new_ltv_seg]}
+        )
+        figl = px.bar(
+            ltvc, x="scenario", y="avg_ltv", color="scenario",
+            title="Avg LTV per treated user (36-mo)", text=ltvc["avg_ltv"].map("₹{:,.0f}".format),
+        )
+        figl.update_traces(textposition="outside")
+        figl.update_yaxes(title="₹ LTV")
+        st.plotly_chart(figl, width="stretch")
+
+    if is_discount_tx:
+        verdict = (
+            f"a **{magnitude}% retention discount** lifts LTV by **₹{per_user_dltv:,.0f}/user** "
+            f"(net **₹{total_dltv:,.0f}** across the segment) — the longer lifetime outweighs "
+            f"the lower price here."
+            if total_dltv >= 0 else
+            f"a **{magnitude}% retention discount** *destroys* **₹{abs(per_user_dltv):,.0f}/user** "
+            f"of LTV (net **−₹{abs(total_dltv):,.0f}**) — you'd be giving margin to users who'd "
+            f"mostly have stayed anyway. Try it on a higher-churn segment."
+        )
+        tail = f"Churn drops {base_seg:.1%} → {new_seg:.1%}, but {verdict}"
+    else:
+        tail = (
+            f"Churn drops **{base_seg:.1%} → {new_seg:.1%}**, retaining ~**{expected_saved:,.0f}** "
+            f"users and moving LTV by **₹{per_user_dltv:,.0f}/user**."
+        )
+
+    tx_label = treatment.split(" (")[0].lower()
     st.info(
         f"**Read-out:** treating **{users_treated:,}** users in *{target}* with "
-        f"*{treatment.lower()}* (N={magnitude}, {adoption_rate:.0%} take-up) is projected "
-        f"to cut that segment's churn from **{base_seg:.1%} → {new_seg:.1%}**, retaining "
-        f"~**{expected_saved:,.0f}** users. Next step in a real test-and-learn: run this "
-        f"as a randomised holdout (treatment vs control) and measure the actual lift."
+        f"*{tx_label}* ({adoption_rate:.0%} take-up). {tail} Next step: run it as a "
+        f"randomised holdout (treatment vs control) and measure the actual LTV lift."
     )
 
 
