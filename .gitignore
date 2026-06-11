@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# OS / editor
+.DS_Store
+
+# Claude Code local-only settings
+.claude/settings.local.json
+
+# Runtime / logs
+streamlit.log
+
+# Generated data artifacts (reproducible via the scripts)
+inflow.csv
+outflow.csv
+users_master.csv
+feed_sample.json
+feed/
